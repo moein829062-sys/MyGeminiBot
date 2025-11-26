@@ -1,0 +1,130 @@
+from pyrogram import Client, filters
+from pyrogram.types import Message
+import google.generativeai as genai
+from flask import Flask
+from threading import Thread
+import json
+import os
+import asyncio
+
+# ================= تنظیمات (اینجا را پر کنید) =================
+API_ID = 14303003               # جایگزین کنید (عدد)
+API_HASH = '88650c7e9d9705c8fa0059b5fcd4716d'     # جایگزین کنید (متن داخل کوتیشن)
+GEMINI_KEY = 'AIzaSyA-rn6mdKgUq3kw-IRfwrBarYSQqzLwti0' # جایگزین کنید
+
+# نام فایلی که لیست کانال‌های تحت نظر را ذخیره میکند
+DB_FILE = "watched_channels.json"
+# ==============================================================
+
+# تنظیمات هوش مصنوعی
+genai.configure(api_key=GEMINI_KEY)
+model = genai.GenerativeModel('gemini-pro')
+
+# تنظیمات ربات تلگرام
+app = Client("my_super_agent", api_id=API_ID, api_hash=API_HASH)
+
+# --- توابع ذخیره‌سازی (حافظه ربات) ---
+def load_watched_channels():
+    if not os.path.exists(DB_FILE): return []
+    try:
+        with open(DB_FILE, 'r') as f: return json.load(f)
+    except: return []
+
+def save_watched_channel(chat_id):
+    channels = load_watched_channels()
+    if chat_id not in channels:
+        channels.append(chat_id)
+        with open(DB_FILE, 'w') as f: json.dump(channels, f)
+        return True
+    return False
+
+def remove_watched_channel(chat_id):
+    channels = load_watched_channels()
+    if chat_id in channels:
+        channels.remove(chat_id)
+        with open(DB_FILE, 'w') as f: json.dump(channels, f)
+        return True
+    return False
+
+# --- وب‌سرور برای بیدار ماندن در هاست رایگان ---
+server = Flask(__name__)
+@server.route('/')
+def home(): return "Bot is Alive and Watching!"
+def run_server(): server.run(host="0.0.0.0", port=8080)
+
+# ==========================================================
+# بخش ۱: فرماندهی (پیام به Saved Messages)
+# ==========================================================
+@app.on_message(filters.me & filters.text & ~filters.forwarded)
+async def commander(client, message: Message):
+    text = message.text
+    
+    # دستور: /watch @channel
+    if text.startswith("/watch"):
+        try:
+            target = text.split()[1]
+            chat = await client.get_chat(target)
+            if save_watched_channel(chat.id):
+                await message.edit(f"✅ کانال **{chat.title}** به لیست جاسوسی اضافه شد!")
+            else:
+                await message.edit("⚠️ قبلاً اضافه شده است.")
+        except: await message.edit("❌ کانال یافت نشد یا دستور اشتباه است.")
+
+    # دستور: /unwatch @channel
+    elif text.startswith("/unwatch"):
+        try:
+            target = text.split()[1]
+            chat = await client.get_chat(target)
+            if remove_watched_channel(chat.id):
+                await message.edit(f"🗑 نظارت بر **{chat.title}** لغو شد.")
+            else:
+                await message.edit("⚠️ این کانال در لیست نبود.")
+        except: await message.edit("❌ خطا.")
+
+    # دستور: /list
+    elif text == "/list":
+        ids = load_watched_channels()
+        await message.edit(f"📋 **لیست تحت نظر:**\n{ids}")
+
+    # دستور جستجو: /find کلمه
+    elif text.startswith("/find"):
+        query = text.replace("/find", "").strip()
+        await message.edit(f"🔍 در حال جستجوی سراسری برای: {query}...")
+        results = ""
+        count = 0
+        try:
+            async for item in client.search_global(query, limit=10):
+                if item.document or item.text: # فقط فایل یا متن
+                    link = item.link if item.link else "لینک خصوصی"
+                    src = item.chat.title if item.chat else "ناشناس"
+                    typ = "📄 فایل" if item.document else "📝 متن"
+                    results += f"{typ} | {src}\n🔗 {link}\n\n"
+                    count += 1
+            
+            if count > 0: await client.send_message("me", f"📊 نتایج:\n{results}")
+            else: await message.edit("❌ یافت نشد.")
+        except Exception as e: await message.edit(f"خطا: {e}")
+
+# ==========================================================
+# بخش ۲: اجرای خودکار (مانیتورینگ)
+# ==========================================================
+@app.on_message(filters.channel)
+async def auto_monitor(client, message: Message):
+    watched = load_watched_channels()
+    if message.chat.id in watched:
+        # اگر متن بود -> بده به جمنای
+        if message.text:
+            try:
+                prompt = f"این متن را بازنویسی کن، لینک هایش را حذف کن و جذاب بنویس:\n{message.text}"
+                res = model.generate_content(prompt)
+                await client.send_message(MY_DESTINATION_CHANNEL, res.text)
+            except: pass
+        
+        # اگر فایل/عکس/ویدیو بود -> مستقیم کپی کن (یا کپشن رو عوض کن)
+        elif message.media:
+            # اینجا فقط کپی میکنیم. اگر بخواهی کپشن عوض شود باید به جمنای بدی
+            await message.copy(MY_DESTINATION_CHANNEL)
+
+if __name__ == '__main__':
+    Thread(target=run_server).start()
+    app.run()
