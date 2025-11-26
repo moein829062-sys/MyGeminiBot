@@ -1,1 +1,5 @@
 # MyGeminiBot
+pyrogram
+tgcrypto
+google-generativeai
+flask
